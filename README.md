@@ -21,7 +21,7 @@
 
 ## Для работы потребуется: 
 - Python 3.7+ (желательно 3.10 или новее).
-Библеотеки:
+- Библеотеки:
 - pip install python-telegram-bot requests
 - pip install python-dotenv
 
