@@ -19,11 +19,11 @@
 
 ---
 
-- Для работы потребуется: 
+## Для работы потребуется: 
 - Python 3.7+ (желательно 3.10 или новее).
 Библеотеки: pip install python-telegram-bot requests, pip install python-dotenv
 
-- Как настроить: 
+## Как настроить: 
 - в файле bot.py необходимо указать свои данные:
 - TELEGRAM_TOKEN = 'ТВОЙ ТОКЕН ТГ'
 - TWITCH_CLIENT_ID = 'TWITCH API'
