@@ -32,6 +32,9 @@
 - TWITCH_CLIENT_SECRET = 'Твой Twitch Secret Code'
 - TWITCH_USER_LOGIN = 'Ник Twitch'
 
+  ![image](https://github.com/user-attachments/assets/15afc591-874c-4339-9c59-ed2e8b652be2)
+
+
 - так же есть строчка CHECK_INTERVAL - это раз в какое время бот проверяет идёт ли трансляция на канале, по умолчанию 5 секунд.
 
 - Так же в LINKS_MESSAGE необходимо указать свои ссылки, если есть необходимость или можно просто удалить, если ненужно.
