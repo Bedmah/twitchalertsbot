@@ -9,6 +9,7 @@ import aiohttp
 from dotenv import load_dotenv
 from telegram import KeyboardButton, ReplyKeyboardMarkup, Update
 from telegram.constants import ParseMode
+from telegram.error import NetworkError, RetryAfter, TimedOut
 from telegram.ext import (
     Application,
     ApplicationBuilder,
@@ -53,6 +54,35 @@ LIMIT_REACHED_TEXT = "Достнигнут технический лимит, п
 class BroadcastState:
     step: str  # target|content
     targets: set[int]
+
+
+async def tg_call_with_retry(factory, *, attempts: int = 3, base_delay: float = 1.0):
+    last_error = None
+    for attempt in range(1, attempts + 1):
+        try:
+            return await factory()
+        except RetryAfter as exc:
+            last_error = exc
+            delay = float(getattr(exc, "retry_after", 1.0)) + 0.5
+            if attempt >= attempts:
+                raise
+            await asyncio.sleep(delay)
+        except (TimedOut, NetworkError, aiohttp.ClientError) as exc:
+            last_error = exc
+            if attempt >= attempts:
+                raise
+            await asyncio.sleep(base_delay * attempt)
+    if last_error:
+        raise last_error
+
+
+async def safe_reply_text(message, text: str, **kwargs) -> bool:
+    try:
+        await tg_call_with_retry(lambda: message.reply_text(text, **kwargs))
+        return True
+    except Exception:
+        logging.exception("reply_text failed")
+        return False
 
 
 def get_main_keyboard(is_admin: bool) -> ReplyKeyboardMarkup:
@@ -227,9 +257,9 @@ async def send_long_text(message, text: str, reply_markup=None, html: bool = Fal
         if idx == len(chunks) - 1 and reply_markup is not None:
             kwargs["reply_markup"] = reply_markup
         if html:
-            await message.reply_html(chunk, disable_web_page_preview=disable_preview, **kwargs)
+            await tg_call_with_retry(lambda: message.reply_html(chunk, disable_web_page_preview=disable_preview, **kwargs))
         else:
-            await message.reply_text(chunk, disable_web_page_preview=disable_preview, **kwargs)
+            await tg_call_with_retry(lambda: message.reply_text(chunk, disable_web_page_preview=disable_preview, **kwargs))
 
 
 async def build_broadcast_result_text(sent_ok: int, failed: list[tuple[int, str]]) -> str:
@@ -311,11 +341,11 @@ async def send_to_targets(
     for uid in sorted(targets):
         try:
             if kind == "text":
-                await app.bot.send_message(uid, text or "")
+                await tg_call_with_retry(lambda: app.bot.send_message(uid, text or ""))
             elif kind == "photo":
-                await app.bot.send_photo(uid, photo=photo_id, caption=caption)
+                await tg_call_with_retry(lambda: app.bot.send_photo(uid, photo=photo_id, caption=caption))
             elif kind == "document":
-                await app.bot.send_document(uid, document=document_id, caption=caption)
+                await tg_call_with_retry(lambda: app.bot.send_document(uid, document=document_id, caption=caption))
             ok += 1
         except Exception as exc:
             reason = str(exc).strip() or exc.__class__.__name__
@@ -377,11 +407,11 @@ async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         return
     await ensure_user(update)
     if not await is_admin(user.id):
-        await message.reply_text("⛔ Доступ запрещен.")
+        await safe_reply_text(message, "⛔ Доступ запрещен.")
         return
     clear_states(context)
     await active_db.log_action(user.id, "admin_open")
-    await message.reply_text("Админ-панель:", reply_markup=get_admin_keyboard())
+    await safe_reply_text(message, "Админ-панель:", reply_markup=get_admin_keyboard())
 
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -739,11 +769,14 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         if not subs:
             context.user_data.pop("await_unsubscribe_select", None)
             reply = "У вас нет подписок."
-            await message.reply_text(reply, reply_markup=get_main_keyboard(admin))
+            await safe_reply_text(message, reply, reply_markup=get_main_keyboard(admin))
         else:
             context.user_data["await_unsubscribe_select"] = True
             reply = "Ваши подписки. Нажмите кнопку, чтобы отписаться:"
-            await message.reply_text(reply, reply_markup=get_unsubscribe_keyboard(subs))
+            sent = await safe_reply_text(message, reply, reply_markup=get_unsubscribe_keyboard(subs))
+            if not sent:
+                # Do not leave user in unstable unsubscribe mode if menu message was not delivered.
+                context.user_data.pop("await_unsubscribe_select", None)
         await active_db.log_action(user.id, "my_subscriptions", str(len(subs)))
         return
 
@@ -951,15 +984,25 @@ async def monitor_tick(context: ContextTypes.DEFAULT_TYPE) -> None:
             if should_notify:
                 in_cooldown = last_notified and (now_utc - last_notified < cooldown)
                 if not in_cooldown:
+                    success_count = 0
                     for uid in await active_db.list_subscribers_for_streamer(login):
                         try:
                             if not await active_db.is_user_allowed(uid):
                                 continue
-                            await app.bot.send_message(uid, f"🔴 {login} в эфире! https://www.twitch.tv/{login}")
+                            await tg_call_with_retry(
+                                lambda: app.bot.send_message(uid, f"🔴 {login} в эфире! https://www.twitch.tv/{login}")
+                            )
                             await active_db.log_action(uid, "notify_stream_live", login)
+                            success_count += 1
                         except Exception:
                             logging.exception("notify failed uid=%s login=%s", uid, login)
-                    last_notified = now_utc
+                    if success_count > 0:
+                        last_notified = now_utc
+                    else:
+                        logging.warning(
+                            "notify skipped cooldown update streamer=%s because all deliveries failed",
+                            login,
+                        )
                 else:
                     logging.info("cooldown skip streamer=%s", login)
 
@@ -1024,7 +1067,17 @@ def main() -> None:
     _ = old_db
     asyncio.set_event_loop(asyncio.new_event_loop())
 
-    app = ApplicationBuilder().token(TELEGRAM_TOKEN).post_init(post_init).post_shutdown(post_shutdown).build()
+    app = (
+        ApplicationBuilder()
+        .token(TELEGRAM_TOKEN)
+        .connect_timeout(30)
+        .read_timeout(30)
+        .write_timeout(30)
+        .pool_timeout(30)
+        .post_init(post_init)
+        .post_shutdown(post_shutdown)
+        .build()
+    )
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_command))
