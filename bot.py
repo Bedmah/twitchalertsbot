@@ -56,7 +56,7 @@ class BroadcastState:
     targets: set[int]
 
 
-async def tg_call_with_retry(factory, *, attempts: int = 3, base_delay: float = 1.0):
+async def tg_call_with_retry(factory, *, attempts: int = 2, base_delay: float = 0.5):
     last_error = None
     for attempt in range(1, attempts + 1):
         try:
@@ -78,7 +78,7 @@ async def tg_call_with_retry(factory, *, attempts: int = 3, base_delay: float = 
 
 async def safe_reply_text(message, text: str, **kwargs) -> bool:
     try:
-        await tg_call_with_retry(lambda: message.reply_text(text, **kwargs))
+        await tg_call_with_retry(lambda: message.reply_text(text, **kwargs), attempts=2, base_delay=0.3)
         return True
     except Exception:
         logging.exception("reply_text failed")
@@ -257,9 +257,17 @@ async def send_long_text(message, text: str, reply_markup=None, html: bool = Fal
         if idx == len(chunks) - 1 and reply_markup is not None:
             kwargs["reply_markup"] = reply_markup
         if html:
-            await tg_call_with_retry(lambda: message.reply_html(chunk, disable_web_page_preview=disable_preview, **kwargs))
+            await tg_call_with_retry(
+                lambda: message.reply_html(chunk, disable_web_page_preview=disable_preview, **kwargs),
+                attempts=2,
+                base_delay=0.3,
+            )
         else:
-            await tg_call_with_retry(lambda: message.reply_text(chunk, disable_web_page_preview=disable_preview, **kwargs))
+            await tg_call_with_retry(
+                lambda: message.reply_text(chunk, disable_web_page_preview=disable_preview, **kwargs),
+                attempts=2,
+                base_delay=0.3,
+            )
 
 
 async def build_broadcast_result_text(sent_ok: int, failed: list[tuple[int, str]]) -> str:
@@ -341,11 +349,19 @@ async def send_to_targets(
     for uid in sorted(targets):
         try:
             if kind == "text":
-                await tg_call_with_retry(lambda: app.bot.send_message(uid, text or ""))
+                await tg_call_with_retry(lambda: app.bot.send_message(uid, text or ""), attempts=2, base_delay=0.5)
             elif kind == "photo":
-                await tg_call_with_retry(lambda: app.bot.send_photo(uid, photo=photo_id, caption=caption))
+                await tg_call_with_retry(
+                    lambda: app.bot.send_photo(uid, photo=photo_id, caption=caption),
+                    attempts=2,
+                    base_delay=0.5,
+                )
             elif kind == "document":
-                await tg_call_with_retry(lambda: app.bot.send_document(uid, document=document_id, caption=caption))
+                await tg_call_with_retry(
+                    lambda: app.bot.send_document(uid, document=document_id, caption=caption),
+                    attempts=2,
+                    base_delay=0.5,
+                )
             ok += 1
         except Exception as exc:
             reason = str(exc).strip() or exc.__class__.__name__
@@ -990,7 +1006,9 @@ async def monitor_tick(context: ContextTypes.DEFAULT_TYPE) -> None:
                             if not await active_db.is_user_allowed(uid):
                                 continue
                             await tg_call_with_retry(
-                                lambda: app.bot.send_message(uid, f"🔴 {login} в эфире! https://www.twitch.tv/{login}")
+                                lambda: app.bot.send_message(uid, f"🔴 {login} в эфире! https://www.twitch.tv/{login}"),
+                                attempts=2,
+                                base_delay=0.5,
                             )
                             await active_db.log_action(uid, "notify_stream_live", login)
                             success_count += 1
@@ -1070,10 +1088,10 @@ def main() -> None:
     app = (
         ApplicationBuilder()
         .token(TELEGRAM_TOKEN)
-        .connect_timeout(30)
-        .read_timeout(30)
-        .write_timeout(30)
-        .pool_timeout(30)
+        .connect_timeout(10)
+        .read_timeout(15)
+        .write_timeout(15)
+        .pool_timeout(10)
         .post_init(post_init)
         .post_shutdown(post_shutdown)
         .build()
